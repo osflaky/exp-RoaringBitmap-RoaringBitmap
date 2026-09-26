@@ -1,0 +1,209 @@
+import java.time.Duration
+
+plugins {
+    id("net.researchgate.release") version "2.8.1"
+    id("com.github.ben-manes.versions") version "0.38.0"
+    id("maven-publish")
+    id("com.diffplug.spotless") version "6.25.0"
+    id("signing")
+    id("com.gradleup.nmcp.aggregation") version "1.4.3"
+}
+
+repositories {
+    mavenCentral()
+}
+
+
+
+// some parts of the Kotlin DSL don't work inside a `subprojects` block yet, so we do them the old way
+// (without typesafe accessors)
+
+subprojects {
+    // used in per-subproject dependencies
+    @Suppress("UNUSED_VARIABLE") val deps by extra {
+        mapOf(
+                "jupiter" to "5.12.2",
+                "guava" to "20.0",
+                "commons-lang" to "3.4"
+        )
+    }
+
+    apply(plugin = "java-library")
+
+    repositories {
+        mavenCentral()
+    }
+
+    group = "org.roaringbitmap"
+
+    // Gradle 9+ no longer bundles the JUnit Platform launcher on the test classpath.
+    dependencies {
+        "testRuntimeOnly"("org.junit.platform:junit-platform-launcher:1.12.2")
+    }
+
+    tasks {
+        withType<JavaCompile> {
+            options.isDeprecation = true
+            options.isWarnings = true
+            options.compilerArgs = listOf("-Xlint:unchecked")
+            options.release.set(8)
+        }
+
+        withType<Javadoc> {
+            options {
+                // suppress javadoc's complaints about undocumented things
+                // we have to set a dummy "value" (here, `true`) to have the option actually used
+                (this as StandardJavadocDocletOptions).addBooleanOption("Xdoclint:none").value = true
+            }
+        }
+
+        withType<Test> {
+            val javaToolchains = project.extensions.getByType<JavaToolchainService>()
+            val requestedVersion = (project.properties["testOnJava"] ?: "11").toString().toInt()
+            val currentVersion = JavaVersion.current().majorVersion.toInt()
+            val versionToUse = if (currentVersion > requestedVersion) currentVersion else requestedVersion
+            javaLauncher.set(javaToolchains.launcherFor {
+                languageVersion.set(JavaLanguageVersion.of(versionToUse))
+            })
+        }
+    }
+
+    apply(plugin = "com.diffplug.spotless")
+
+    // You can format the codebase with `./gradlew spotlessApply`
+    // You check the codebase format with `./gradlew spotlessCheck`
+    spotless {
+        // Ratchetting from master means we check/apply only files which are changed relatively to master
+        // This is especially useful for performance, given the whole codebase has been formatted with Spotless.
+        ratchetFrom("origin/master")
+
+        java {
+            // Disbale javadoc formatting as most the javacode do not follow HTML syntax.
+            googleJavaFormat().reflowLongStrings().formatJavadoc(false)
+            formatAnnotations()
+
+            importOrder("\\#", "org.roaringbitmap", "", "java", "javax")
+            removeUnusedImports()
+
+            trimTrailingWhitespace()
+            endWithNewline()
+        }
+    }
+}
+
+subprojects.filter { listOf("roaringbitmap", "bsi").contains(it.name) }.forEach { project ->
+    project.run {
+        apply(plugin = "maven-publish")
+        if (rootProject.providers.gradleProperty("signingKey").isPresent) {
+            apply(plugin = "signing")
+        }
+        configure<JavaPluginExtension> {
+            withSourcesJar()
+            withJavadocJar()
+        }
+
+        configure<PublishingExtension> {
+            publications {
+                register<MavenPublication>("sonatype") {
+                    groupId = project.group.toString()
+                    artifactId = if (project.name == "roaringbitmap") "RoaringBitmap" else project.name
+                    version = project.version.toString()
+
+                    from(components["java"])
+
+                    // requirements for maven central
+                    // https://central.sonatype.org/pages/requirements.html
+                    pom {
+                        name.set("$groupId:$artifactId")
+                        description.set("Roaring bitmaps are compressed bitmaps (also called bitsets) which tend to outperform conventional compressed bitmaps such as WAH or Concise.")
+                        url.set("https://github.com/RoaringBitmap/RoaringBitmap")
+                        issueManagement {
+                            system.set("GitHub Issue Tracking")
+                            url.set("https://github.com/RoaringBitmap/RoaringBitmap/issues")
+                        }
+                        licenses {
+                            license {
+                                name.set("Apache 2")
+                                url.set("http://www.apache.org/licenses/LICENSE-2.0.txt")
+                                distribution.set("repo")
+                            }
+                        }
+                        developers {
+                            developer {
+                                id.set("lemire")
+                                name.set("Daniel Lemire")
+                                email.set("lemire@gmail.com")
+                                url.set("http://lemire.me/en/")
+                                roles.addAll("architect", "developer", "maintainer")
+                                timezone.set("-5")
+                                properties.put("picUrl", "http://lemire.me/fr/images/JPG/profile2011B_152.jpg")
+                            }
+                        }
+                        scm {
+                            connection.set("scm:git:https://github.com/RoaringBitmap/RoaringBitmap.git")
+                            developerConnection.set("scm:git:https://github.com/RoaringBitmap/RoaringBitmap.git")
+                            url.set("https://github.com/RoaringBitmap/RoaringBitmap")
+                        }
+                    }
+                }
+            }
+
+            val signingKey = rootProject.providers.gradleProperty("signingKey")
+            if (signingKey.isPresent) {
+                signing {
+                    useInMemoryPgpKeys(
+                        rootProject.providers.gradleProperty("signingKey").orNull,
+                        rootProject.providers.gradleProperty("signingPassword").orNull
+                    )
+                    sign(publishing.publications["sonatype"])
+                }
+            }
+
+             // A safe throw-away place to publish to:
+            // ./gradlew publishSonatypePublicationToLocalDebugRepository -Pversion=foo
+            repositories {
+                maven {
+                    name = "localDebug"
+                    url = project.layout.buildDirectory.dir("repos/localDebug").get().asFile.toURI()
+                }
+            }
+
+            // ./gradlew publishSonatypePublicationToGitHubPackagesRepository
+            repositories {
+                maven {
+                    name = "GitHubPackages"
+                    url = uri("https://maven.pkg.github.com/RoaringBitmap/RoaringBitmap")
+                    credentials {
+                        username = System.getenv("GITHUB_ACTOR")
+                        password = System.getenv("GITHUB_TOKEN")
+                    }
+                }
+            }
+
+        }
+
+
+    }
+}
+
+release {
+    // for some odd reason, we used to have our tags be of the form roaringbitmap-0.1.0
+    // instead of just 0.1.0 or v0.1.0.
+    tagTemplate = "\$version"
+}
+	
+
+nmcpAggregation {
+  allowDuplicateProjectNames.set(true)
+  centralPortal {
+    username = providers.gradleProperty("sonatypeUsername")
+    password = providers.gradleProperty("sonatypePassword")
+    publishingType = providers.environmentVariable("CI")
+      .map { "AUTOMATIC" }
+      .orElse("USER_MANAGED")
+    publishingTimeout = Duration.ofMinutes(120)
+    validationTimeout = Duration.ofMinutes(120)
+    publicationName = "${project.name}-$version"
+  }
+  publishAllProjectsProbablyBreakingProjectIsolation()
+}
