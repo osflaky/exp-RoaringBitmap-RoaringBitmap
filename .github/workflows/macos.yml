@@ -1,0 +1,41 @@
+name: Java 21 CI macOS (Apple)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - os: windows-latest
+          java: 21
+          arch: arm64
+          runner: windows-11-arm
+          expander_leg: windows-latest-21-arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up JDK 21
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: ${{ matrix.java }}
+
+    - name: Build with Gradle
+      run: ./gradlew assemble
+
+    - name: Test with Gradle
+      id: test_macos_java21
+      run: ./gradlew test
+
+    - uses: actions/upload-artifact@v4    # upload test results if the test was not skipped
+      if: ${{ !cancelled() && steps.test_macos_java21.outcome != 'skipped'}}
+      with:
+        name: test-results-macos-j21
+        path: '*/build/test-results/**/*.xml'
+        overwrite: 'true'
+    name: build [${{ matrix.expander_leg }}]
+    timeout-minutes: 150
